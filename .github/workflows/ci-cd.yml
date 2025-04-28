@@ -1,0 +1,186 @@
+name: ML Model CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov
+        
+    - name: Run tests
+      run: |
+        pytest --cov=app tests/
+        
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-results
+        path: |
+          .coverage
+          coverage.xml
+          
+  train-model:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Set up MLflow
+      run: |
+        pip install mlflow boto3
+        mkdir -p mlruns
+        
+    - name: Train model
+      run: |
+        # This is a placeholder. In a real scenario, you would:
+        # 1. Download your training data from a secure location
+        # 2. Run the training script with appropriate parameters
+        # python scripts/train.py --data-path data/training_data.csv --model-type classification --algorithm random_forest --target-column target --numerical-features "feature1,feature2,feature3" --register-model --model-name "ml-model"
+        echo "Model training would happen here"
+        
+    - name: Upload model artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: model-artifacts
+        path: models/
+        
+  optimize-model:
+    needs: train-model
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Download model artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: model-artifacts
+        path: models/
+        
+    - name: Optimize model
+      run: |
+        # This is a placeholder. In a real scenario, you would:
+        # 1. Run the optimization script with appropriate parameters
+        # python scripts/optimize_model.py --model-uri "models:/ml-model/Production" --convert-to-onnx --quantize --register-model --model-name "ml-model-optimized"
+        echo "Model optimization would happen here"
+        mkdir -p optimized_models
+        
+    - name: Upload optimized model
+      uses: actions/upload-artifact@v3
+      with:
+        name: optimized-model
+        path: optimized_models/
+        
+  build-and-push:
+    needs: optimize-model
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Download optimized model
+      uses: actions/download-artifact@v3
+      with:
+        name: optimized-model
+        path: optimized_models/
+        
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+      
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository }}/ml-model-api:latest
+          ghcr.io/${{ github.repository }}/ml-model-api:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      
+    - name: Set Kubernetes context
+      uses: azure/k8s-set-context@v3
+      with:
+        method: kubeconfig
+        kubeconfig: ${{ secrets.KUBE_CONFIG }}
+        
+    - name: Deploy to Kubernetes
+      run: |
+        # Set environment variables for deployment
+        export DOCKER_REGISTRY=ghcr.io/${{ github.repository }}
+        export IMAGE_TAG=${{ github.sha }}
+        export MODEL_NAME=ml-model
+        export MODEL_STAGE=Production
+        
+        # Apply Kubernetes manifests
+        envsubst < k8s/deployment.yaml | kubectl apply -f -
+        kubectl apply -f k8s/service.yaml
+        kubectl apply -f k8s/hpa.yaml
+        
+        # Wait for deployment to complete
+        kubectl rollout status deployment/ml-model-api
+        
+    - name: Deploy monitoring
+      run: |
+        # Create monitoring namespace if it doesn't exist
+        kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+        
+        # Apply monitoring manifests
+        kubectl apply -f k8s/monitoring/prometheus.yaml
+        kubectl apply -f k8s/monitoring/grafana.yaml

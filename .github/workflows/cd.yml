@@ -1,0 +1,19 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # Example Deployment Step
+      - name: Deploy to Production
+        run: |
+          echo "🚀 Deploying application..."
+          # Here you would trigger your real deployment script.
